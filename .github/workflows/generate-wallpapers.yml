@@ -44,7 +44,7 @@ jobs:
       - name: Install AI libraries (CPU-only PyTorch, much smaller)
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -U diffusers transformers accelerate sentencepiece protobuf pillow
+          pip install -U diffusers transformers accelerate sentencepiece protobuf pillow ftfy
 
       - name: Generate images
         env:
