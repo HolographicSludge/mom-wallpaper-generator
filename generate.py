@@ -35,7 +35,7 @@ def period(date=None):
     return (y*12 + m-1) * 2 + halfm
 
 
-def getTheme(period):
+def getTheme(current):
     HORROR_MOVIES = ["Nightmare on Elm Street", "the movie Friday the 13th", "the movie Scream", "The Shining", "The Exorcist", "the movie It", "the movie Halloween", "Stranger Things"]
     SPACE_SHIT = ["outer space", "planets", "astronauts"]
     WINTER = ["a snowy cabin at night", "a frozen lake with skaters", "a snowy village street", "a snowy forest", "a snow hare", "a snowman", "several snowflake patterns"]
@@ -53,15 +53,15 @@ def getTheme(period):
         "an orchard",           "thanksgiving",
         rand(WINTER),           "christmas"
     ]
-    return THEMES[period % 24]
+    return THEMES[current % 24]
 
 def getStyle():
     STYLES = ["painting", "watercolor", "pixel art", "cartoon", "vector art", "arts-and-crafts"]
     return rand(STYLES)
 
 # takes the period now, so generating NEXT period's images uses NEXT period's theme
-def prompt(period):
-    theme = getTheme(period)
+def prompt(current):
+    theme = getTheme(current)
     style = getStyle()
     # no "desktop"/"wallpaper" in the prompt, the model drew laptops, taskbars and watermarks because of those words
     # this model has no negative prompt, but its text encoder is a full language model (Qwen3), so it understands "no X" better than older models did
@@ -120,16 +120,16 @@ def main():
             print(f"deleting old period {folder.name}")
             shutil.rmtree(folder)
 
-    todo = [period for period in wanted if not isComplete(out / str(period))]
+    todo = [periodNum for periodNum in wanted if not isComplete(out / str(periodNum))]
     if not todo:
         print(f"periods {wanted} already have images, nothing to do")
         return
 
     # decide every prompt up front, then turn them all into embeddings in one go
     jobs = []   # (period, image number, prompt text)
-    for period in todo:
+    for periodNum in todo:
         for i in range(NUM_IMAGES):
-            jobs.append((period, i, prompt(period)))
+            jobs.append((periodNum, i, prompt(periodNum)))
     allEmbeds = encodePrompts([text for _, _, text in jobs])
 
     import torch
@@ -137,21 +137,21 @@ def main():
     print("loading image model...", flush=True)
     pipe = Flux2KleinPipeline.from_pretrained(MODEL, text_encoder=None, tokenizer=None, dtype=torch.bfloat16)
 
-    for period in todo:
-        print(f"generating period {period} (theme slot {period % 24})", flush=True)
+    for periodNum in todo:
+        print(f"generating period {periodNum} (theme slot {periodNum % 24})", flush=True)
         # build in a temp folder and rename at the end, so a half-finished set
         # (e.g. the job timed out) never looks finished to mom's laptop
-        tmp = out / f"_tmp_{period}"
+        tmp = out / f"_tmp_{periodNum}"
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir()
         for (jp, i, text), embeds in zip(jobs, allEmbeds):
-            if jp != period:
+            if jp != periodNum:
                 continue
             print(f"  prompt: {text!r}", flush=True)
             start = time.time()
             generate(pipe, embeds).save(tmp / f"{i:02d}.jpg", quality=JPEG_QUALITY)
             print(f"  image {i+1}/{NUM_IMAGES} done in {time.time() - start:.0f}s", flush=True)
-        final = out / str(period)
+        final = out / str(periodNum)
         shutil.rmtree(final, ignore_errors=True)
         tmp.rename(final)
 
