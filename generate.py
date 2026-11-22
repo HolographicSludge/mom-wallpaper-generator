@@ -38,7 +38,7 @@ def period(date=None):
 def getTheme(period):
     HORROR_MOVIES = ["Nightmare on Elm Street", "the movie Friday the 13th", "the movie Scream", "The Shining", "The Exorcist", "the movie It", "the movie Halloween", "Stranger Things"]
     SPACE_SHIT = ["outer space", "planets", "astronauts"]
-    WINTER = ["a snowy cabin at night", "a frozen lake with skaters", "a snowy village street", "a snowy forest", "a snow hare"]
+    WINTER = ["a snowy cabin at night", "a frozen lake with skaters", "a snowy village street", "a snowy forest", "a snow hare", "a snowman", "several snowflake patterns"]
     THEMES = [
         "new years",            "the northern lights",
         "valentine's day",      "mardi gras",
@@ -56,7 +56,7 @@ def getTheme(period):
     return THEMES[period % 24]
 
 def getStyle():
-    STYLES = ["painting", "watercolor", "pixel art", "cartoon", "vector art"]
+    STYLES = ["painting", "watercolor", "pixel art", "cartoon", "vector art", "arts-and-crafts"]
     return rand(STYLES)
 
 # takes the period now, so generating NEXT period's images uses NEXT period's theme
