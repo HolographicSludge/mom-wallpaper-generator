@@ -6,7 +6,7 @@ OUTPUT_DIR holds one folder per period, e.g. OUTPUT_DIR/21/00.jpg ... 09.jpg
 For the current period AND the next one, any missing set gets generated.
 Folders for periods that are already over get deleted.
 
-ai model i'm using: https://huggingface.co/Photoroom/prx-1024-t2i-beta
+ai model i'm using: https://huggingface.co/black-forest-labs/FLUX.2-klein-4B
 """
 
 import random, shutil, sys, time
@@ -16,6 +16,7 @@ from pathlib import Path
 # constants
 NUM_IMAGES = 10       # MUST match NUM_IMAGES in Set_New_Wallpapers.py
 JPEG_QUALITY = 92     # jpg instead of png: ~10x smaller files, keeps the repo small
+MODEL = "black-forest-labs/FLUX.2-klein-4B"   # Apache 2.0, step-distilled (only needs 4 steps)
 
 
 # helper function - select a random item from a list
@@ -34,9 +35,10 @@ def period(date=None):
     return (y*12 + m-1) * 2 + halfm
 
 
-def getTheme(p):
+def getTheme(period):
     HORROR_MOVIES = ["Nightmare on Elm Street", "the movie Friday the 13th", "the movie Scream", "The Shining", "The Exorcist", "the movie It", "the movie Halloween", "Stranger Things"]
     SPACE_SHIT = ["outer space", "planets", "astronauts"]
+    WINTER = ["a snowy cabin at night", "a frozen lake with skaters", "a snowy village street", "a snowy forest", "a snow hare"]
     THEMES = [
         "new years",            "the northern lights",
         "valentine's day",      "mardi gras",
@@ -49,39 +51,53 @@ def getTheme(p):
         "harry potter",         rand(SPACE_SHIT),
         rand(HORROR_MOVIES),    "halloween",
         "an orchard",           "thanksgiving",
-        "a winter wonderland",  "christmas"
+        rand(WINTER),           "christmas"
     ]
-    return THEMES[p % 24]
+    return THEMES[period % 24]
 
 def getStyle():
     STYLES = ["painting", "watercolor", "pixel art", "cartoon", "vector art"]
     return rand(STYLES)
 
 # takes the period now, so generating NEXT period's images uses NEXT period's theme
-def prompt(p):
-    theme = getTheme(p)
+def prompt(period):
+    theme = getTheme(period)
     style = getStyle()
-    final = f"A desktop wallpaper themed around {theme}" + (f" in a {style} style" if random.randint(1, 3)<3 else "")
+    # no "desktop"/"wallpaper" in the prompt, the model drew laptops, taskbars and watermarks because of those words
+    # this model has no negative prompt, but its text encoder is a full language model (Qwen3), so it understands "no X" better than older models did
+    final = f"A wide, detailed scene themed around {theme}" + (f" in a {style} style" if random.randint(1, 3)<3 else "") + ". There is no text, lettering, logo or watermark anywhere in the image."
     return final
 
 
-def generate(pipe, p):
+# turns prompt text into the numbers the image model actually uses.
+# done for ALL images first, so the text encoder (~8 GB) can be deleted from RAM before the image model (~8 GB) is loaded. both at once wouldn't fit in 16 GB.
+def encodePrompts(texts):
+    import gc, torch
+    from diffusers import Flux2KleinPipeline
+    print("loading text encoder...", flush=True)
+    enc = Flux2KleinPipeline.from_pretrained(MODEL, transformer=None, vae=None, dtype=torch.bfloat16)
+    embeds = []
+    with torch.no_grad():
+        for text in texts:
+            embeds.append(enc.encode_prompt(prompt=text)[0])
+    del enc
+    gc.collect()
+    return embeds
+
+
+def generate(pipe, embeds):
     import torch
     from PIL import Image
 
-    text = prompt(p)
     seed = random.randint(0, 2**31 - 1)
-    print(f"  prompt: {text!r}  seed: {seed}", flush=True)
-
     image = pipe(
-            text,
-            width = 1280, height = 720,                          # model is trained around 1024px, so do 720p then upscale
-            num_inference_steps = 28,                            # value from the model card; fewer = faster but worse
-            guidance_scale = 5.0,                                # value from the model card
+            prompt_embeds = embeds,
+            width = 1280, height = 720,                          # model isn't trained for 1080p, so do 720p then upscale
+            num_inference_steps = 4,                             # klein is step-distilled: 4 steps is what it's made for
             generator = torch.Generator("cpu").manual_seed(seed),
         ).images[0]
 
-    # upscale 1.5x: 1280x720 -> 1920x1080
+    # upscale to 1080p
     return image.resize((1920, 1080), Image.LANCZOS).convert("RGB")
 
 
@@ -96,7 +112,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
 
     current = period()
-    wanted = [current, current + 1]
+    wanted = [current, current+1]
 
     # delete sets for periods that are already over
     for folder in out.iterdir():
@@ -104,29 +120,38 @@ def main():
             print(f"deleting old period {folder.name}")
             shutil.rmtree(folder)
 
-    todo = [p for p in wanted if not isComplete(out / str(p))]
+    todo = [period for period in wanted if not isComplete(out / str(period))]
     if not todo:
         print(f"periods {wanted} already have images, nothing to do")
         return
 
-    # load the model only if there's actually something to make (it's a big download)
-    import torch
-    from diffusers.pipelines.prx import PRXPipeline
-    print("loading model...", flush=True)
-    pipe = PRXPipeline.from_pretrained("Photoroom/prx-1024-t2i-beta", torch_dtype=torch.bfloat16)
+    # decide every prompt up front, then turn them all into embeddings in one go
+    jobs = []   # (period, image number, prompt text)
+    for period in todo:
+        for i in range(NUM_IMAGES):
+            jobs.append((period, i, prompt(period)))
+    allEmbeds = encodePrompts([text for _, _, text in jobs])
 
-    for p in todo:
-        print(f"generating period {p} (theme slot {p % 24})", flush=True)
+    import torch
+    from diffusers import Flux2KleinPipeline
+    print("loading image model...", flush=True)
+    pipe = Flux2KleinPipeline.from_pretrained(MODEL, text_encoder=None, tokenizer=None, dtype=torch.bfloat16)
+
+    for period in todo:
+        print(f"generating period {period} (theme slot {period % 24})", flush=True)
         # build in a temp folder and rename at the end, so a half-finished set
         # (e.g. the job timed out) never looks finished to mom's laptop
-        tmp = out / f"_tmp_{p}"
+        tmp = out / f"_tmp_{period}"
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir()
-        for i in range(NUM_IMAGES):
+        for (jp, i, text), embeds in zip(jobs, allEmbeds):
+            if jp != period:
+                continue
+            print(f"  prompt: {text!r}", flush=True)
             start = time.time()
-            generate(pipe, p).save(tmp / f"{i:02d}.jpg", quality=JPEG_QUALITY)
+            generate(pipe, embeds).save(tmp / f"{i:02d}.jpg", quality=JPEG_QUALITY)
             print(f"  image {i+1}/{NUM_IMAGES} done in {time.time() - start:.0f}s", flush=True)
-        final = out / str(p)
+        final = out / str(period)
         shutil.rmtree(final, ignore_errors=True)
         tmp.rename(final)
 
