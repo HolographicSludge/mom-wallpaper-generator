@@ -1,0 +1,70 @@
+# Makes the wallpapers on GitHub's servers and publishes them to the "images" branch.
+# Mom's laptop downloads from:
+#   https://raw.githubusercontent.com/<owner>/<repo>/images/<period>/<00-09>.jpg
+
+name: Generate wallpapers
+
+on:
+  schedule:
+    # 9:17 UTC on the 5th and 20th of every month. That's ~10 days BEFORE each
+    # new period starts (1st and 16th), so a late or failed run has time to be retried.
+    - cron: "17 9 5,20 * *"
+  workflow_dispatch:   # adds a "Run workflow" button on the Actions tab
+
+permissions:
+  contents: write      # needed to push to the images branch
+
+concurrency:
+  group: generate-wallpapers
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350   # GitHub's hard limit per job is 6 hours (360 min)
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Get current images (if the images branch exists yet)
+        run: |
+          mkdir out
+          if git ls-remote --exit-code --heads origin images; then
+            git fetch --depth 1 origin images
+            git archive origin/images | tar -x -C out
+          fi
+          ls -R out
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install AI libraries (CPU-only PyTorch, much smaller)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -U diffusers transformers accelerate sentencepiece protobuf pillow
+
+      - name: Generate images
+        env:
+          # Optional. Only needed if Hugging Face says a model file is "gated".
+          # Add it under Settings > Secrets and variables > Actions > New repository secret.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python generate.py out
+
+      - name: Publish to the images branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Replace the images branch with a single fresh commit every time,
+          # so old wallpapers don't pile up in git history forever.
+          # This push also counts as repo activity, which stops GitHub from
+          # auto-disabling the schedule after 60 quiet days.
+          cd out
+          git init -q -b images
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q --allow-empty -m "Wallpapers as of $(date -u +%F)"
+          git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" images
