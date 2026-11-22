@@ -42,6 +42,7 @@ def getTheme(current):
     HORROR_MOVIES = ["Nightmare on Elm Street", "the movie Friday the 13th", "the movie Scream", "The Shining", "The Exorcist", "the movie It", "the movie Halloween", "Stranger Things"]
     SPACE_SHIT = ["outer space", "planets", "astronauts"]
     WINTER = ["a snowy cabin at night", "a frozen lake with skaters", "a snowy village street", "a snowy forest", "a snow hare", "a snowman", "several snowflake patterns"]
+    THANKSGIVING = ["thanksgiving", "an autumn forest", "a pattern of autumn leaves"]
     THEMES = [
         "new years",            "the northern lights",
         "valentine's day",      "mardi gras",
@@ -53,7 +54,7 @@ def getTheme(current):
         "back-to-school",       "science",
         "harry potter",         rand(SPACE_SHIT),
         rand(HORROR_MOVIES),    "halloween",
-        "an orchard",           "thanksgiving",
+        "an orchard",           rand(THANKSGIVING),
         rand(WINTER),           "christmas"
     ]
     return THEMES[current % 24]
