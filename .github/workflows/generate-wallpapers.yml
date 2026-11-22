@@ -21,16 +21,9 @@ concurrency:
 jobs:
   generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 350   # GitHub's hard limit per job is 6 hours (360 min)
+    timeout-minutes: 60    # Cloudflare takes seconds per image, so this is plenty
 
     steps:
-      - name: Free up disk space (the AI model is ~15 GB, the runner only has ~14 GB free)
-        run: |
-          df -h /
-          # delete big preinstalled tools this project never uses
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
-          df -h /
-
       - name: Check out code
         uses: actions/checkout@v4
 
@@ -48,19 +41,19 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install AI libraries (CPU-only PyTorch, much smaller)
-        run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -U diffusers transformers accelerate sentencepiece protobuf pillow ftfy
+      - name: Install libraries
+        run: pip install requests pillow
 
       - name: Generate images
         env:
-          # Optional. Only needed if Hugging Face says a model file is "gated".
-          # Add it under Settings > Secrets and variables > Actions > New repository secret.
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # Both are set under Settings > Secrets and variables > Actions > New repository secret
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: python generate.py out
 
       - name: Publish to the images branch
+        # runs even if generating failed partway, so any FINISHED period still gets published
+        if: ${{ !cancelled() }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -69,6 +62,7 @@ jobs:
           # This push also counts as repo activity, which stops GitHub from
           # auto-disabling the schedule after 60 quiet days.
           cd out
+          rm -rf _tmp_*   # unfinished sets never get published
           git init -q -b images
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
