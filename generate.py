@@ -7,16 +7,19 @@ For the current period AND the next one, any missing set gets generated.
 Folders for periods that are already over get deleted.
 
 ai model i'm using: https://huggingface.co/black-forest-labs/FLUX.2-klein-4B
+run on Cloudflare Workers AI's GPUs (free daily allowance), because it was WAY too slow on GitHub's CPU-only runner
+needs two env variables (GitHub secrets): CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN
 """
 
-import random, shutil, sys, time
+import base64, io, os, random, shutil, sys, time
 from datetime import datetime as dt, timezone
 from pathlib import Path
 
 # constants
 NUM_IMAGES = 10       # MUST match NUM_IMAGES in Set_New_Wallpapers.py
 JPEG_QUALITY = 92     # jpg instead of png: ~10x smaller files, keeps the repo small
-MODEL = "black-forest-labs/FLUX.2-klein-4B"   # Apache 2.0, step-distilled (only needs 4 steps)
+MODEL = "@cf/black-forest-labs/flux-2-klein-4b"   # Cloudflare's name for FLUX.2 klein 4B (Apache 2.0)
+MAX_TRIES = 5         # per image, in case Cloudflare is busy or rejects a prompt
 
 
 # helper function - select a random item from a list
@@ -69,36 +72,39 @@ def prompt(current):
     return final
 
 
-# turns prompt text into the numbers the image model actually uses.
-# done for ALL images first, so the text encoder (~8 GB) can be deleted from RAM before the image model (~8 GB) is loaded. both at once wouldn't fit in 16 GB.
-def encodePrompts(texts):
-    import gc, torch
-    from diffusers import Flux2KleinPipeline
-    print("loading text encoder...", flush=True)
-    enc = Flux2KleinPipeline.from_pretrained(MODEL, transformer=None, vae=None, dtype=torch.bfloat16)
-    embeds = []
-    with torch.no_grad():
-        for text in texts:
-            embeds.append(enc.encode_prompt(prompt=text)[0])
-    del enc
-    gc.collect()
-    return embeds
-
-
-def generate(pipe, embeds):
-    import torch
+# asks Cloudflare to make one image, returns it as a Pillow Image.
+# tries again (with a freshly picked prompt) if Cloudflare is busy or refuses the prompt
+def generate(current):
+    import requests
     from PIL import Image
 
-    seed = random.randint(0, 2**31 - 1)
-    image = pipe(
-            prompt_embeds = embeds,
-            width = 1280, height = 720,                          # model isn't trained for 1080p, so do 720p then upscale
-            num_inference_steps = 4,                             # klein is step-distilled: 4 steps is what it's made for
-            generator = torch.Generator("cpu").manual_seed(seed),
-        ).images[0]
+    url = f"https://api.cloudflare.com/client/v4/accounts/{os.environ['CLOUDFLARE_ACCOUNT_ID']}/ai/run/{MODEL}"
+    headers = {"Authorization": f"Bearer {os.environ['CLOUDFLARE_API_TOKEN']}"}
 
-    # upscale to 1080p
-    return image.resize((1920, 1080), Image.LANCZOS).convert("RGB")
+    for attempt in range(1, MAX_TRIES + 1):
+        text = prompt(current)
+        print(f"  prompt: {text!r}", flush=True)
+        # this model wants "multipart form data". (None, value) is how requests sends a plain form field
+        formFields = {"prompt": (None, text), "width": (None, "1920"), "height": (None, "1080")}
+        try:
+            response = requests.post(url, headers=headers, files=formFields, timeout=180)
+            if response.headers.get("content-type", "").startswith("image/"):
+                imageBytes = response.content                       # raw image back
+            else:
+                body = response.json()
+                if not response.ok or not body.get("success", True):
+                    raise RuntimeError(f"HTTP {response.status_code}: {body.get('errors')}")
+                imageBytes = base64.b64decode(body["result"]["image"])   # base64 image inside JSON
+            image = Image.open(io.BytesIO(imageBytes)).convert("RGB")
+            # should already be 1920x1080, this is just a safety net
+            if image.size != (1920, 1080):
+                image = image.resize((1920, 1080), Image.LANCZOS)
+            return image
+        except Exception as e:
+            print(f"  attempt {attempt}/{MAX_TRIES} failed: {e}", flush=True)
+            if attempt == MAX_TRIES:
+                raise
+            time.sleep(10 * attempt)   # wait a bit longer each time
 
 
 def isComplete(folder):
@@ -125,18 +131,6 @@ def main():
         print(f"periods {wanted} already have images, nothing to do")
         return
 
-    # decide every prompt up front, then turn them all into embeddings in one go
-    jobs = []   # (period, image number, prompt text)
-    for periodNum in todo:
-        for i in range(NUM_IMAGES):
-            jobs.append((periodNum, i, prompt(periodNum)))
-    allEmbeds = encodePrompts([text for _, _, text in jobs])
-
-    import torch
-    from diffusers import Flux2KleinPipeline
-    print("loading image model...", flush=True)
-    pipe = Flux2KleinPipeline.from_pretrained(MODEL, text_encoder=None, tokenizer=None, dtype=torch.bfloat16)
-
     for periodNum in todo:
         print(f"generating period {periodNum} (theme slot {periodNum % 24})", flush=True)
         # build in a temp folder and rename at the end, so a half-finished set
@@ -144,12 +138,9 @@ def main():
         tmp = out / f"_tmp_{periodNum}"
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir()
-        for (jp, i, text), embeds in zip(jobs, allEmbeds):
-            if jp != periodNum:
-                continue
-            print(f"  prompt: {text!r}", flush=True)
+        for i in range(NUM_IMAGES):
             start = time.time()
-            generate(pipe, embeds).save(tmp / f"{i:02d}.jpg", quality=JPEG_QUALITY)
+            generate(periodNum).save(tmp / f"{i:02d}.jpg", quality=JPEG_QUALITY)
             print(f"  image {i+1}/{NUM_IMAGES} done in {time.time() - start:.0f}s", flush=True)
         final = out / str(periodNum)
         shutil.rmtree(final, ignore_errors=True)
