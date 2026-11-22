@@ -61,7 +61,7 @@ def getStyle():
 def prompt(p):
     theme = getTheme(p)
     style = getStyle()
-    final = f"A desktop wallpaper themed around {theme}" + (f" in a {style} style" if random.randint(1, 3)==1 else "")
+    final = f"A desktop wallpaper themed around {theme}" + (f" in a {style} style" if random.randint(1, 3)<3 else "")
     return final
 
 
